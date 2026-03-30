@@ -1,12 +1,13 @@
 /*
  * client.c — Player client for Scribble
  *
- * Usage: ./client <server_ip> <port>
+ * Usage: ./client <host> <port>
  *
  * Connects to the server, sends a PLAYER_JOIN message with the player's
  * name, then uses select() on stdin and the server socket to send guesses
  * and receive messages.
  */
+#define _POSIX_C_SOURCE 200112L
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,43 +18,12 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/select.h>
+#include <netdb.h>
 #include "net.h"
 
 #ifndef PORT
 #define PORT DEFAULT_PORT
 #endif
-
-/*
- * Connect to the server at the given IP and port.
- * Returns the socket fd on success, -1 on error.
- */
-static int connect_to_server(const char *ip, int port)
-{
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) {
-        perror("socket");
-        return -1;
-    }
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons((uint16_t)port);
-
-    if (inet_pton(AF_INET, ip, &addr.sin_addr) <= 0) {
-        fprintf(stderr, "Invalid address: %s\n", ip);
-        close(fd);
-        return -1;
-    }
-
-    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        perror("connect");
-        close(fd);
-        return -1;
-    }
-
-    return fd;
-}
 
 /*
  * Build and send a PLAYER_JOIN message.
@@ -161,36 +131,83 @@ static void handle_server_message(const message_t *msg)
 int main(int argc, char *argv[])
 {
     if (argc < 3) {
-        fprintf(stderr, "Usage: %s <server_ip> <port>\n", argv[0]);
-        return 1;
+        fprintf(stderr, "Usage: %s <host> <port>\n", argv[0]);
+        exit(1);
     }
 
-    const char *server_ip = argv[1];
+    const char *host = argv[1];
     int port = atoi(argv[2]);
 
-    /* Prompt for player name */
+    if (port <= 0 || port > 65535) {
+        fprintf(stderr, "Invalid port: %s\n", argv[2]);
+        exit(1);
+    }
+
+    /* Use getaddrinfo to resolve hostname */
+    struct addrinfo hints, *result, *rp;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;           /* IPv4 only */
+    hints.ai_socktype = SOCK_STREAM;     /* TCP */
+
+    char port_str[16];
+    snprintf(port_str, sizeof(port_str), "%d", port);
+
+    int status = getaddrinfo(host, port_str, &hints, &result);
+    if (status != 0) {
+        fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(status));
+        exit(1);
+    }
+
+    /* Try each address returned by getaddrinfo */
+    int sock = -1;
+    for (rp = result; rp != NULL; rp = rp->ai_next) {
+        sock = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        if (sock < 0) {
+            continue;
+        }
+
+        if (connect(sock, rp->ai_addr, rp->ai_addrlen) == 0) {
+            break;  /* Successfully connected */
+        }
+
+        close(sock);
+        sock = -1;
+    }
+
+    freeaddrinfo(result);
+
+    if (sock < 0) {
+        fprintf(stderr, "Failed to connect to %s:%d\n", host, port);
+        exit(1);
+    }
+
+    printf("Connected to %s:%d\n", host, port);
+
+    int sockfd = sock;
+
+    /* Send PLAYER_JOIN */
     char name[MAX_NAME_LEN];
     printf("Enter your name: ");
     fflush(stdout);
+
     if (fgets(name, sizeof(name), stdin) == NULL) {
         fprintf(stderr, "Failed to read name\n");
-        return 1;
-    }
-    /* Strip trailing newline */
-    size_t nlen = strlen(name);
-    if (nlen > 0 && name[nlen - 1] == '\n')
-        name[--nlen] = '\0';
-    if (nlen == 0) {
-        fprintf(stderr, "Name cannot be empty\n");
-        return 1;
+        close(sockfd);
+        exit(1);
     }
 
-    /* Connect to server */
-    int sockfd = connect_to_server(server_ip, port);
-    if (sockfd < 0)
-        return 1;
+    /* Remove trailing newline */
+    size_t name_len = strlen(name);
+    if (name_len > 0 && name[name_len - 1] == '\n') {
+        name[name_len - 1] = '\0';
+        name_len--;
+    }
 
-    printf("Connected to %s:%d\n", server_ip, port);
+    if (name_len == 0) {
+        fprintf(stderr, "Empty name\n");
+        close(sockfd);
+        exit(1);
+    }
 
     /* Send join message */
     if (send_player_join(sockfd, name) < 0) {
