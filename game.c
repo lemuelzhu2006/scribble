@@ -31,6 +31,11 @@ game_state_t* game_init(void)
     game->num_players = 0;
     game->num_words = 0;
     game->word_guessed = 0;
+    game->num_guessed = 0;
+    game->round_active = 0;
+    game->game_started = 0;
+
+    srand((unsigned)time(NULL));
 
     return game;
 }
@@ -169,6 +174,8 @@ void game_start_round(game_state_t *game)
 
     game->round_num++;
     game->word_guessed = 0;
+    game->num_guessed = 0;
+    game->round_active = 1;
 
     /* Reset has_guessed flag for all players */
     for (uint32_t i = 0; i < game->num_players; i++) {
@@ -176,8 +183,8 @@ void game_start_round(game_state_t *game)
         game->players[i].is_artist = 0;
     }
 
-    /* Pick artist: rotate by round number */
-    uint32_t artist_idx = game->round_num % game->num_players;
+    /* Pick artist: round 1 -> index 0 (first player), round 2 -> index 1, etc. */
+    uint32_t artist_idx = (game->round_num - 1) % game->num_players;
     game->players[artist_idx].is_artist = 1;
     game->artist_id = game->players[artist_idx].id;
 
@@ -201,9 +208,6 @@ void game_start_round(game_state_t *game)
  */
 int game_validate_guess(game_state_t *game, const char *guess)
 {
-    if (game->word_guessed)
-        return 0;  /* Already guessed this round */
-
     char guess_upper[MAX_NAME_LEN];
     char word_upper[MAX_NAME_LEN];
 
@@ -215,32 +219,29 @@ int game_validate_guess(game_state_t *game, const char *guess)
     to_uppercase(guess_upper);
     to_uppercase(word_upper);
 
-    if (strcmp(guess_upper, word_upper) == 0) {
-        game->word_guessed = 1;
-        return 1;
-    }
-
-    return 0;
+    return strcmp(guess_upper, word_upper) == 0;
 }
 
 /*
- * Get points awarded to a guesser.
- * is_first_guesser: 1 if this is the first to guess correctly, 0 otherwise.
+ * Get points for the next correct guesser.
+ * First guesser: 10, second: 9, third: 8, ... minimum 5.
  */
-uint32_t game_get_guesser_points(game_state_t *game, int is_first_guesser)
+uint32_t game_get_guesser_points(game_state_t *game)
 {
-    (void)game;  /* Unused */
-    return is_first_guesser ? 10 : 5;
+    uint32_t points = 10 - game->num_guessed;
+    if (points < 5)
+        points = 5;
+    return points;
 }
 
 /*
- * Get points awarded to the artist.
- * word_was_guessed: 1 if word was guessed, 0 if time ran out.
+ * Get points awarded to the artist for a single correct guess.
+ * First correct guesser: +5, each subsequent: +1.
+ * Called BEFORE game_mark_guessed increments num_guessed.
  */
-uint32_t game_get_artist_points(game_state_t *game, int word_was_guessed)
+uint32_t game_get_artist_points_for_guess(game_state_t *game)
 {
-    (void)game;  /* Unused */
-    return word_was_guessed ? 5 : 0;
+    return (game->num_guessed == 0) ? 5 : 1;
 }
 
 /*
@@ -251,6 +252,7 @@ void game_mark_guessed(game_state_t *game, uint32_t player_id)
     for (uint32_t i = 0; i < game->num_players; i++) {
         if (game->players[i].id == player_id) {
             game->players[i].has_guessed = 1;
+            game->num_guessed++;
             return;
         }
     }
@@ -270,4 +272,42 @@ uint32_t game_get_artist(game_state_t *game)
 const char* game_get_secret_word(game_state_t *game)
 {
     return game->secret_word;
+}
+
+/*
+ * Check if all non-artist players have guessed correctly.
+ * Returns 1 if round should end, 0 otherwise.
+ */
+int game_all_guessed(game_state_t *game)
+{
+    /* num_players - 1 because the artist doesn't guess */
+    return game->num_guessed >= game->num_players - 1;
+}
+
+/*
+ * Check if all rounds are done (every player has drawn once).
+ */
+int game_is_over(game_state_t *game)
+{
+    return game->round_num >= game->total_rounds;
+}
+
+/*
+ * Build underscore hint: "_ _ _ _ _" for a 5-letter word.
+ * Spaces in the word are preserved as spaces; all other chars become "_ ".
+ */
+void game_get_hint(game_state_t *game, char *buf, size_t buflen)
+{
+    size_t pos = 0;
+    for (size_t i = 0; game->secret_word[i] && pos + 2 < buflen; i++) {
+        if (game->secret_word[i] == ' ') {
+            buf[pos++] = ' ';
+            buf[pos++] = ' ';
+        } else {
+            if (i > 0)
+                buf[pos++] = ' ';
+            buf[pos++] = '_';
+        }
+    }
+    buf[pos] = '\0';
 }
