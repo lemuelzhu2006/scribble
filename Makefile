@@ -13,7 +13,13 @@ client: client.o net.o
 %.o: %.c net.h game.h
 	$(CC) $(CFLAGS) -c $<
 
-clean:
-	rm -f *.o server client
+test_game: test_game.o game.o
+	$(CC) $(CFLAGS) -o $@ $^
 
-.PHONY: all clean
+test: test_game
+	./test_game
+
+clean:
+	rm -f *.o server client test_game
+
+.PHONY: all clean test
