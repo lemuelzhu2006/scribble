@@ -8,9 +8,18 @@ server: server.o net.o game.o
 	$(CC) $(CFLAGS) -o $@ $^
 
 client: client.o net.o
-	$(CC) $(CFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) -o $@ $^ -lX11
 
-%.o: %.c net.h game.h
+server.o: server.c net.h game.h
+	$(CC) $(CFLAGS) -c $<
+
+client.o: client.c net.h
+	$(CC) $(CFLAGS) -c $<
+
+net.o: net.c net.h
+	$(CC) $(CFLAGS) -c $<
+
+game.o: game.c game.h net.h
 	$(CC) $(CFLAGS) -c $<
 
 test_game: test_game.o game.o

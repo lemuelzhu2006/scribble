@@ -26,9 +26,7 @@
 #define PORT DEFAULT_PORT
 #endif
 
-/* ------------------------------------------------------------------ */
-/*  Logging                                                           */
-/* ------------------------------------------------------------------ */
+/* Logging */
 
 typedef enum { LOG_DEBUG, LOG_INFO, LOG_WARN, LOG_ERROR } log_level_t;
 
@@ -55,9 +53,7 @@ static void server_log(log_level_t lvl, const char *fmt, ...)
     fputc('\n', stderr);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Signal handling  (must be file-scope for the handler)             */
-/* ------------------------------------------------------------------ */
+/* Signal handling */
 
 static volatile sig_atomic_t got_sigint = 0;
 
@@ -67,9 +63,7 @@ static void sigint_handler(int sig)
     got_sigint = 1;
 }
 
-/* ------------------------------------------------------------------ */
-/*  Data types                                                        */
-/* ------------------------------------------------------------------ */
+/* Data types */
 
 typedef struct {
     int    fd;
@@ -88,6 +82,9 @@ typedef struct {
     time_t         round_start_time;
     int            last_countdown;
 
+    /* Canvas state (server-side mirror for late joiners) */
+    uint8_t        canvas[CANVAS_ROWS][CANVAS_COLS];
+
     /* Progressive hints */
     int            revealed[MAX_NAME_LEN];
     int            revealed_count;
@@ -100,16 +97,12 @@ typedef struct {
     int            total_rounds;
 } server_ctx_t;
 
-/* ------------------------------------------------------------------ */
-/*  Forward declarations                                              */
-/* ------------------------------------------------------------------ */
+/* Forward declarations */
 
 static void remove_client(server_ctx_t *ctx, int slot);
 static void start_round(server_ctx_t *ctx);
 
-/* ------------------------------------------------------------------ */
-/*  Client helpers                                                    */
-/* ------------------------------------------------------------------ */
+/* Client helpers */
 
 static void init_clients(server_ctx_t *ctx)
 {
@@ -120,6 +113,7 @@ static void init_clients(server_ctx_t *ctx)
         ctx->clients[i].last_active = 0;
         ctx->clients[i].idle_warned = 0;
     }
+    memset(ctx->canvas, 0, sizeof(ctx->canvas));
 }
 
 static int find_empty_slot(server_ctx_t *ctx)
@@ -141,9 +135,7 @@ static int count_active_clients(server_ctx_t *ctx)
     return n;
 }
 
-/* ------------------------------------------------------------------ */
-/*  Messaging                                                         */
-/* ------------------------------------------------------------------ */
+/* Messaging */
 
 static int send_chat(int fd, const char *text)
 {
@@ -192,9 +184,18 @@ static void broadcast_to_clients(server_ctx_t *ctx, const message_t *msg,
     }
 }
 
-/* ------------------------------------------------------------------ */
-/*  Scoreboard                                                        */
-/* ------------------------------------------------------------------ */
+/* Send full canvas state to a single client */
+static void send_canvas_sync(server_ctx_t *ctx, int slot)
+{
+    message_t msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.msg_type = MSG_CANVAS_SYNC;
+    msg.length = CANVAS_ROWS * CANVAS_COLS;
+    memcpy(msg.payload, ctx->canvas, msg.length);
+    send_message(ctx->clients[slot].fd, &msg);
+}
+
+/* Scoreboard */
 
 static void show_final_scoreboard(server_ctx_t *ctx)
 {
@@ -224,14 +225,11 @@ static void show_final_scoreboard(server_ctx_t *ctx)
     snprintf(buf + pos, sizeof(buf) - (size_t)pos, "\nThanks for playing!\n");
 
     broadcast_chat(ctx, buf);
-
     ctx->game->game_started = 0;
     ctx->game->round_num = 0;
 }
 
-/* ------------------------------------------------------------------ */
-/*  Round management                                                  */
-/* ------------------------------------------------------------------ */
+/* Round management */
 
 static void end_round(server_ctx_t *ctx, const char *reason)
 {
@@ -269,7 +267,6 @@ static void end_round(server_ctx_t *ctx, const char *reason)
     }
 
     broadcast_chat(ctx, buf);
-
     server_log(LOG_INFO, "Round %u/%u ended: %s",
                ctx->game->round_num, ctx->game->total_rounds, reason);
 
@@ -281,9 +278,7 @@ static void end_round(server_ctx_t *ctx, const char *reason)
     }
 }
 
-/* ------------------------------------------------------------------ */
-/*  Progressive hints                                                 */
-/* ------------------------------------------------------------------ */
+/* Progressive hints */
 
 static void build_current_hint(server_ctx_t *ctx)
 {
@@ -359,9 +354,7 @@ static void check_hint_reveal(server_ctx_t *ctx)
                hidden[pick], ctx->current_hint);
 }
 
-/* ------------------------------------------------------------------ */
-/*  start_round                                                       */
-/* ------------------------------------------------------------------ */
+/* start_round */
 
 static void start_round(server_ctx_t *ctx)
 {
@@ -376,11 +369,20 @@ static void start_round(server_ctx_t *ctx)
     ctx->round_start_time = time(NULL);
     ctx->last_countdown = ROUND_TIME_SEC;
 
+    /* Clear canvas for the new round */
+    memset(ctx->canvas, 0, sizeof(ctx->canvas));
     init_round_hints(ctx);
 
     server_log(LOG_INFO, "Round %u/%u started (artist=%u, word=\"%s\")",
                ctx->game->round_num, ctx->game->total_rounds,
                ctx->game->artist_id, ctx->game->secret_word);
+
+    /* Broadcast canvas clear to all clients */
+    message_t clear_msg;
+    memset(&clear_msg, 0, sizeof(clear_msg));
+    clear_msg.msg_type = MSG_DRAW_CLEAR;
+    clear_msg.length = 0;
+    broadcast_to_clients(ctx, &clear_msg, -1);
 
     for (int i = 0; i < MAX_PLAYERS; i++) {
         if (ctx->clients[i].fd == -1 || !ctx->clients[i].active)
@@ -404,12 +406,10 @@ static void start_round(server_ctx_t *ctx)
             snprintf(text, sizeof(text),
                 "\n=== Round %u/%u ===\n"
                 "You are the DRAWER! The word is: %.*s\n"
-                "Hint shown to guessers: %.*s\n"
-                "Wait for others to guess. (%d seconds)\n",
+                "Hint shown to guessers: %.*s\n",
                 ctx->game->round_num, ctx->game->total_rounds,
                 MAX_NAME_LEN, ctx->game->secret_word,
-                (int)sizeof(ctx->current_hint), ctx->current_hint,
-                ROUND_TIME_SEC);
+                (int)sizeof(ctx->current_hint), ctx->current_hint);
         } else {
             snprintf(text, sizeof(text),
                 "\n=== Round %u/%u ===\n"
@@ -424,14 +424,11 @@ static void start_round(server_ctx_t *ctx)
         uint32_t tlen = (uint32_t)strlen(text);
         memcpy(msg.payload + 1, text, tlen);
         msg.length = 1 + tlen;
-
         send_message(ctx->clients[i].fd, &msg);
     }
 }
 
-/* ------------------------------------------------------------------ */
-/*  Connection management                                             */
-/* ------------------------------------------------------------------ */
+/* Connection management */
 
 static int accept_client(server_ctx_t *ctx)
 {
@@ -515,9 +512,7 @@ static void remove_client(server_ctx_t *ctx, int slot)
     }
 }
 
-/* ------------------------------------------------------------------ */
-/*  Message handlers                                                  */
-/* ------------------------------------------------------------------ */
+/* Message handlers */
 
 static void handle_player_join(server_ctx_t *ctx, int slot,
                                 const message_t *msg)
@@ -576,6 +571,7 @@ static void handle_player_join(server_ctx_t *ctx, int slot,
     } else if (ctx->game->round_active) {
         send_chat(ctx->clients[slot].fd,
             "A round is in progress. You'll join the next one.\n");
+        send_canvas_sync(ctx, slot);
     }
 }
 
@@ -645,7 +641,7 @@ static void handle_guess(server_ctx_t *ctx, int slot, const message_t *msg)
         return;
     }
 
-    if (game_validate_guess(ctx->game, guess)) {
+    if (strcasecmp(guess, ctx->game->secret_word) == 0) {
         uint32_t guesser_pts = game_get_guesser_points(ctx->game);
         uint32_t artist_pts  = game_get_artist_points_for_guess(ctx->game);
         player->score += guesser_pts;
@@ -703,6 +699,61 @@ static void handle_guess(server_ctx_t *ctx, int slot, const message_t *msg)
     }
 }
 
+/* Handle a single cell drawing update from the artist */
+static void handle_draw_cell(server_ctx_t *ctx, int slot, const message_t *msg)
+{
+    if (msg->length < 3)
+        return;
+
+    if (ctx->game->round_active) {
+        int is_artist = 0;
+        for (uint32_t i = 0; i < ctx->game->num_players; i++) {
+            if (ctx->game->players[i].id == (uint32_t)slot &&
+                ctx->game->players[i].is_artist) {
+                is_artist = 1;
+                break;
+            }
+        }
+        if (!is_artist)
+            return;
+    }
+
+    uint8_t row   = msg->payload[0];
+    uint8_t col   = msg->payload[1];
+    uint8_t color = msg->payload[2];
+
+    if (row >= CANVAS_ROWS || col >= CANVAS_COLS || color >= NUM_COLORS)
+        return;
+
+    ctx->canvas[row][col] = color;
+    broadcast_to_clients(ctx, msg, slot);
+}
+
+/* Handle a canvas-clear request from the artist */
+static void handle_draw_clear(server_ctx_t *ctx, int slot)
+{
+    if (ctx->game->round_active) {
+        int is_artist = 0;
+        for (uint32_t i = 0; i < ctx->game->num_players; i++) {
+            if (ctx->game->players[i].id == (uint32_t)slot &&
+                ctx->game->players[i].is_artist) {
+                is_artist = 1;
+                break;
+            }
+        }
+        if (!is_artist)
+            return;
+    }
+
+    memset(ctx->canvas, 0, sizeof(ctx->canvas));
+
+    message_t msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.msg_type = MSG_DRAW_CLEAR;
+    msg.length = 0;
+    broadcast_to_clients(ctx, &msg, slot);
+}
+
 static void handle_client_message(server_ctx_t *ctx, int slot)
 {
     message_t msg;
@@ -723,8 +774,11 @@ static void handle_client_message(server_ctx_t *ctx, int slot)
     case MSG_GUESS:
         handle_guess(ctx, slot, &msg);
         break;
-    case MSG_BRUSH_STROKE:
-        broadcast_to_clients(ctx, &msg, slot);
+    case MSG_DRAW_CELL:
+        handle_draw_cell(ctx, slot, &msg);
+        break;
+    case MSG_DRAW_CLEAR:
+        handle_draw_clear(ctx, slot);
         break;
     default:
         server_log(LOG_WARN, "Unknown msg type %u from slot %d",
@@ -733,9 +787,7 @@ static void handle_client_message(server_ctx_t *ctx, int slot)
     }
 }
 
-/* ------------------------------------------------------------------ */
-/*  Timer-based checks                                                */
-/* ------------------------------------------------------------------ */
+/* Timer-based checks */
 
 static void check_countdown(server_ctx_t *ctx)
 {
@@ -800,9 +852,7 @@ static void check_idle_clients(server_ctx_t *ctx)
     }
 }
 
-/* ------------------------------------------------------------------ */
-/*  Admin console  (stdin via select)                                 */
-/* ------------------------------------------------------------------ */
+/* Admin console (stdin via select) */
 
 static void handle_admin_input(server_ctx_t *ctx)
 {
@@ -837,9 +887,10 @@ static void handle_admin_input(server_ctx_t *ctx)
         server_log(LOG_INFO, "  Players online    : %d", active);
         for (int i = 0; i < MAX_PLAYERS; i++) {
             if (ctx->clients[i].fd != -1 && ctx->clients[i].active) {
-                long idle = (long)(time(NULL) - ctx->clients[i].last_active);
+                long idle_s = (long)(time(NULL) -
+                                     ctx->clients[i].last_active);
                 server_log(LOG_INFO, "    [%d] %-16s idle %lds",
-                           i, ctx->clients[i].name, idle);
+                           i, ctx->clients[i].name, idle_s);
             }
         }
 
@@ -885,9 +936,7 @@ static void handle_admin_input(server_ctx_t *ctx)
     }
 }
 
-/* ------------------------------------------------------------------ */
-/*  select() fd_set builder                                           */
-/* ------------------------------------------------------------------ */
+/* select() fd_set builder */
 
 static int build_fdset(server_ctx_t *ctx, fd_set *readfds)
 {
@@ -910,9 +959,7 @@ static int build_fdset(server_ctx_t *ctx, fd_set *readfds)
     return maxfd;
 }
 
-/* ------------------------------------------------------------------ */
-/*  Server socket setup                                               */
-/* ------------------------------------------------------------------ */
+/* Server socket setup */
 
 static int setup_server(int port)
 {
@@ -950,9 +997,7 @@ static int setup_server(int port)
     return fd;
 }
 
-/* ------------------------------------------------------------------ */
-/*  Graceful shutdown                                                 */
-/* ------------------------------------------------------------------ */
+/* Graceful shutdown */
 
 static void shutdown_server(server_ctx_t *ctx)
 {
@@ -993,9 +1038,7 @@ static void shutdown_server(server_ctx_t *ctx)
     ctx->game = NULL;
 }
 
-/* ------------------------------------------------------------------ */
-/*  main                                                              */
-/* ------------------------------------------------------------------ */
+/* main */
 
 int main(int argc, char *argv[])
 {
